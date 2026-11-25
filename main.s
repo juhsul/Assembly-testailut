@@ -1,8 +1,9 @@
 ;;; Muistiinpanot ;;;
 ; Alkuosoitteet datalehden sivu 64
-; PORTA alkuosoite  0x0400
-; TCB0  alkuosoite  0x0A80
-; CPU   alkusosite  0x0030
+; PORTA   0x0400
+; TCA0    0x0A00
+; TCB0    0x0A80
+; CPU     0x0030
 
 ; ldi = Load Immediate
 ; Arvon lataaminen prosessorin rekisteriin r0-r31
@@ -53,7 +54,11 @@
 
 ;;; Vakioiden määritys ;;;
 .equ CPU.SREG, 0x003F ; Status register (datalehti sivu 35)
+.equ CPU_SPL,  0x003D ; s. 34
+.equ CPU_SPH,  0x003E
+.equ RAMEND,   0x3FFF
 
+; PORTx rekisterit (s. 146)
 .equ PORTA_DIR,      0x0400 ; Koko rekisterin suunnan asettaminen 0/1
 .equ PORTA_DIRSET,   0x0401 ; Yksittäisen pinnin asettaminen lähdöksi
 .equ PORTA_DIRCLR,   0x0402 ; Yksittäisen pinnin asettaminen tuloksi
@@ -66,6 +71,13 @@
 ; PINCTRL offset = 0x10 + n*0x01 [n=0..7]
 .equ PORTA_PIN6CTRL, 0x0416 ; Pin n Control -rekisteri (sivu 158)
 
+; TCA0-ajastimen rekisterit (s. 197, pääsivu s. 185)
+.equ TCA0_CTRLA,     0x0A00
+.equ TCA0_INTCTRL,   0x0A0A
+.equ TCA0_INTFLAGS,  0x0A0B
+.equ TCA0_PER,       0x0A26 ; 16-bittinen. High-byte = + 0x01
+
+; TCB0-ajastimen rekisterit (s. 243, pääsivu s. 233)
 .equ TCB0_CTRLA,     0x0A80
 .equ TCB0_CTRLB,     0x0A81
 .equ TCB0_INTCTRL,   0x0A85
@@ -83,15 +95,18 @@
 .section .vectors,"ax",@progbits
 .global __vectors
 
-__vectors:
+__vectors: ; Datalehti s. 66
     .org 0x0000
     jmp RESET
 
     ; PORTA-pinneillä on vain yksi keskeytysvektori, joten jos on monta ulkoista
     ; keskeytystä saman ryhmän pinneistä, pitää kyseessä olevan pinnin tarkistus
     ; tehdä keskeytyksen sisällä.
-    .org 0x0018 ; (0x000C * 2 = 0x0018) datalehti sivu 66
+    .org 0x0018 ; (0x000C * 2 = 0x0018)
     jmp PORTA_ISR
+
+    .org 0x001C ; (0x000E * 2 = 0x001C)
+    jmp TCA0_OVF_ISR
 
     ;.org 0x0030 ; 0x18 * 2 = 0x0030
     ;jmp TCB0_ISR
@@ -106,17 +121,18 @@ __vectors:
 RESET:
 ; main:
 ; _main:
+    ; Pino-osoitin
     ldi r16, lo8(RAMEND)
     out CPU_SPL, r16
     ldi r16, hi8(RAMEND)
     out CPU_SPH, r16
 
-    ;PA7 lähdöksi
+    ;PA7 lähdöksi (Nappi-ledi)
     ldi r16, (1 << 7)
     sts PORTA_DIRSET, r16
     sts PORTA_OUTSET, r16
 
-    ;PA6 tuloksi
+    ;PA6 tuloksi (Nappi)
     ldi r16, (1 << 6) 
     sts PORTA_DIRCLR, r16
     ; Sisäinen pull-up ja keskeytys laskevalle reunalle
@@ -127,10 +143,28 @@ RESET:
     ldi r16, (1 << 6)
     sts PORTA_INTFLAGS, r16
 
-    ;PA5 lähdöksi
+    ;PA5 lähdöksi (Karvalakkivilkku)
     ldi r16, (1 << 5)
     sts PORTA_DIRSET, r16
     sts PORTA_OUTSET, r16
+
+    ;PA4 lähdöksi (TCA0-Ledivilkku)
+    ldi r16, (1 << 4)
+    sts PORTA_DIRSET, r16
+
+    ; TCA0 jakso: 6510 tikkiä @ (3,33 MHz / 256 (prescaler alla)) = ~0,5 s
+    ldi r16, lo8(6510)
+    sts TCA0_PER, r16
+    ldi r16, hi8(6510)
+    sts TCA0_PER + 1, r16
+
+    ; TCA0 ylivuotokeskeytys
+    ldi r16, (1 << 0)
+    sts TCA0_INTCTRL, r16
+
+    ; Käynnistetään TCA0 (DIV256 = 0x0C + ENABLE = 1 -> 0x0D)
+    ldi r16, 0x0D
+    sts TCA0_CTRLA, r16
 
     ; Global Interrupt Enable
     sei
@@ -177,4 +211,23 @@ PORTA_ISR:
     pop r16 ; Palauta SREG
     out CPU.SREG, r16
     pop r16 ; Palautetaan r16 arvo
+    reti
+
+; Keskeytysrutiini (ajetaan 0,5 s välein)
+TCA0_OVF_ISR:
+    push r16
+    in r16, CPU.SREG
+    push r16
+
+    ; 1. Tyhjennetään TCA0 OVF-lippu
+    ldi r16, (1 << 0)
+    sts TCA0_INTFLAGS, r16
+
+    ; 2. Vaihdetaan ledin tila PA4
+    ldi r16, (1 << 4)
+    sts PORTA_OUTTGL, r16
+
+    pop r16
+    out CPU.SREG, r16
+    pop r16
     reti
